@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  denylist:
+    name: Internal-name denylist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check for forbidden names
+        run: |
+          FORBIDDEN="solvent|SOLVENT|Solvent Agent|engine\.api|engine\.auth|engine\.audit|engine\.llm|engine\.billing|engine\.pricing|engine\.middleware|engine\.memory|engine\.patching|engine\.sentry"
+          if grep -rniE "$FORBIDDEN" --include="*.py" --include="*.toml" --include="*.yaml" --include="*.yml" --include="*.md" --include="*.json" .; then
+            echo "FAIL: forbidden names found in codebase"
+            exit 1
+          fi
+          echo "PASS: no forbidden names found"
+
+  gitleaks:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  lint:
+    name: Lint + typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: ruff check .
+      - run: mypy zurixai/
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: pytest tests/ -v

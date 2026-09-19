@@ -1,0 +1,254 @@
+"""Supply-Chain Checker — validates npm/PyPI packages against registry metadata."""
+
+from __future__ import annotations
+
+import json
+import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+
+import httpx
+
+
+def check_supply_chain(project_dir: Path) -> dict:
+    """Check dependencies for typosquatting, suspicious patterns, and registry metadata."""
+    result = {
+        "checked": 0,
+        "suspicious": 0,
+        "unavailable": 0,
+        "suspicious_packages": [],
+        "details": {},
+    }
+
+    # Collect packages from package.json + requirements.txt
+    packages = _collect_packages(project_dir)
+
+    if not packages:
+        return result
+
+    # Check each package for local patterns first
+    local_suspicious = {}
+    for pkg_name, pkg_source in packages.items():
+        suspicion_score = 0
+        reasons: list[str] = []
+
+        if _is_likely_typosquat(pkg_name):
+            suspicion_score += 2
+            reasons.append("possible typosquatting pattern")
+
+        if _has_suspicious_name(pkg_name):
+            suspicion_score += 1
+            reasons.append("suspicious naming pattern")
+
+        if suspicion_score > 0:
+            local_suspicious[pkg_name] = (suspicion_score, reasons)
+
+    # Concurrent registry checks
+    registry_results = {}
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = {}
+        for pkg_name, pkg_source in packages.items():
+            if pkg_source == "npm":
+                futures[executor.submit(_check_npm_registry, pkg_name)] = (pkg_name, "npm")
+            elif pkg_source == "pypi":
+                futures[executor.submit(_check_pypi_registry, pkg_name)] = (pkg_name, "pypi")
+
+        for future in as_completed(futures):
+            pkg_name, pkg_source = futures[future]
+            try:
+                info = future.result()
+                registry_results[pkg_name] = info or {"status": "unavailable"}
+            except (httpx.HTTPError, ValueError, TypeError, KeyError, AttributeError):
+                registry_results[pkg_name] = {"status": "unavailable"}
+
+    # Combine local + registry results
+    for pkg_name, pkg_source in packages.items():
+        result["checked"] += 1
+        suspicion_score = 0
+        reasons: list[str] = []
+
+        # Local pattern checks
+        if pkg_name in local_suspicious:
+            score, local_reasons = local_suspicious[pkg_name]
+            suspicion_score += score
+            reasons.extend(local_reasons)
+
+        # Registry checks
+        if pkg_name in registry_results:
+            info = registry_results[pkg_name]
+            result["details"][pkg_name] = info
+            if info.get("status") == "unavailable":
+                result["unavailable"] += 1
+            if info.get("status") == "not_found":
+                suspicion_score += 3
+                reasons.append("package not found in public registry")
+            if info.get("is_deprecated"):
+                suspicion_score += 2
+                reasons.append("package is deprecated")
+            if info.get("is_unmaintained"):
+                suspicion_score += 1
+                reasons.append("unmaintained (no recent updates)")
+
+        if suspicion_score >= 2:
+            result["suspicious"] += 1
+            result["suspicious_packages"].append({
+                "name": pkg_name,
+                "source": pkg_source,
+                "score": suspicion_score,
+                "reasons": reasons,
+            })
+
+    return result
+
+
+def _collect_packages(project_dir: Path) -> dict[str, str]:
+    """Collect package names from package.json, pyproject.toml, and requirements.txt."""
+    packages: dict[str, str] = {}
+
+    # package.json
+    package_json = project_dir / "package.json"
+    if package_json.exists():
+        try:
+            data = json.loads(package_json.read_text())
+            for dep in list(data.get("dependencies", {}).keys()):
+                packages[dep] = "npm"
+            for dep in list(data.get("devDependencies", {}).keys()):
+                packages[dep] = "npm"
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    # pyproject.toml
+    pyproject = project_dir / "pyproject.toml"
+    if pyproject.exists():
+        content = pyproject.read_text()
+        for match in re.finditer(
+            r'"([a-zA-Z0-9_-]+)(?:\[.*?\])?(?:>=.*?|<.*?|~=.*?|!=.*?|==.*?)"', content
+        ):
+            pkg_name = match.group(1).lower().replace("_", "-")
+            packages[pkg_name] = "pypi"
+
+    # requirements.txt
+    req_file = project_dir / "requirements.txt"
+    if req_file.exists():
+        for line in req_file.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and not line.startswith("-"):
+                pkg_name = re.split(r"[>=<~!]", line)[0].strip()
+                packages[pkg_name] = "pypi"
+
+    return packages
+
+
+def _is_likely_typosquat(pkg_name: str) -> bool:
+    """Check if a package name looks like a typosquatting attempt."""
+    # Strip @scope/ prefix for pattern matching
+    name = pkg_name.split("/")[-1] if "/" in pkg_name else pkg_name
+
+    # Common typosquatting patterns
+    suspicious_patterns = [
+        r"^[a-z]{20,}$",  # Very long names (single segment)
+        r"^[a-z]+_[a-z]+$",  # Underscored names (npm uses hyphens)
+        r"^(test|debug|tmp|temp)-",  # Test/debug prefixes
+    ]
+
+    for pattern in suspicious_patterns:
+        if re.match(pattern, name):
+            return True
+
+    # Check for character substitution (l→1, o→0, etc.) — skip @scope prefix
+    # Only flag if ALL characters are leet speak (not just one at the end)
+    leet_speak = {"0": "o", "1": "l", "3": "e", "4": "a", "5": "s", "7": "t"}
+    normalized = name
+    for char, replacement in leet_speak.items():
+        normalized = normalized.replace(char, replacement)
+
+    # Count how many characters were changed
+    changes = sum(1 for a, b in zip(name, normalized) if a != b)
+    # Only flag if multiple characters changed (single trailing number is common, e.g. urllib3)
+    return changes > 1
+
+
+def _has_suspicious_name(pkg_name: str) -> bool:
+    """Check for suspicious naming patterns."""
+    # Names that are very similar to popular packages
+    popular_prefixes = ["lodash", "express", "react", "axios", "moment", "chalk"]
+    for prefix in popular_prefixes:
+        if pkg_name.startswith(prefix) and pkg_name != prefix and len(pkg_name) < len(prefix) + 5:
+            return True
+    return False
+
+
+def _check_npm_registry(pkg_name: str) -> dict:
+    """Check npm registry for package metadata."""
+    try:
+        resp = httpx.get(f"https://registry.npmjs.org/{pkg_name}", timeout=5.0)
+        if resp.status_code == 404:
+            return {"status": "not_found"}
+        if resp.status_code == 200:
+            data = resp.json()
+            latest_version = data.get("dist-tags", {}).get("latest", "")
+            time_data = data.get("time", {})
+            modified = time_data.get("modified", "")
+            deprecated = data.get("versions", {}).get(latest_version, {}).get("deprecated", None)
+
+            # Check if unmaintained (no update in 2+ years)
+            is_unmaintained = False
+            if modified:
+                from datetime import datetime
+                try:
+                    last_modified = datetime.fromisoformat(modified)
+                    is_unmaintained = (datetime.now(last_modified.tzinfo) - last_modified).days > 730
+                except (ValueError, TypeError):
+                    pass
+
+            return {
+                "status": "ok",
+                "latest_version": latest_version,
+                "last_modified": modified,
+                "is_deprecated": deprecated is not None,
+                "is_unmaintained": is_unmaintained,
+            }
+    except (httpx.HTTPError, ValueError, TypeError, AttributeError):
+        pass
+    return {"status": "unavailable"}
+
+
+def _check_pypi_registry(pkg_name: str) -> dict:
+    """Check PyPI registry for package metadata."""
+    try:
+        resp = httpx.get(f"https://pypi.org/pypi/{pkg_name}/json", timeout=5.0)
+        if resp.status_code == 404:
+            return {"status": "not_found"}
+        if resp.status_code == 200:
+            data = resp.json()
+            info = data.get("info", {})
+            release = data.get("releases", {})
+            latest_version = info.get("version", "")
+
+            # Get last release date
+            last_release_date = None
+            if latest_version and latest_version in release:
+                files = release[latest_version]
+                if files:
+                    last_release_date = files[0].get("upload_time_iso_8601", "")
+
+            # Check if unmaintained
+            is_unmaintained = False
+            if last_release_date:
+                from datetime import datetime
+                try:
+                    last_date = datetime.fromisoformat(last_release_date)
+                    is_unmaintained = (datetime.now(last_date.tzinfo) - last_date).days > 730
+                except (ValueError, TypeError):
+                    pass
+
+            return {
+                "status": "ok",
+                "latest_version": latest_version,
+                "last_release": last_release_date,
+                "is_deprecated": info.get("yanked", False),
+                "is_unmaintained": is_unmaintained,
+            }
+    except (httpx.HTTPError, ValueError, TypeError, AttributeError):
+        pass
+    return {"status": "unavailable"}
