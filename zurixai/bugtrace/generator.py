@@ -7,7 +7,7 @@ the body is a stub marked clearly as ``# TODO: AI-generated body``.
 
 from __future__ import annotations
 
-from zurixai.bugtrace.parser import ParsedTrace
+from zurixai.bugtrace.parser import ParsedFrame, ParsedTrace
 
 
 def _module_name_from_path(file_path: str) -> str:
@@ -49,7 +49,7 @@ def generate_failing_test(trace: ParsedTrace) -> dict:
     }
 
 
-def _python_test(trace: ParsedTrace, culprit: object) -> str:
+def _python_test(trace: ParsedTrace, culprit: ParsedFrame | None) -> str:
     error_type = trace.error_type
     error_message = trace.error_message.replace('"', '\\"')
     module = _module_name_from_path(culprit.file) if culprit else "unknown_module"
@@ -77,7 +77,7 @@ def _python_test(trace: ParsedTrace, culprit: object) -> str:
     )
 
 
-def _javascript_test(trace: ParsedTrace, culprit: object) -> str:
+def _javascript_test(trace: ParsedTrace, culprit: ParsedFrame | None) -> str:
     error_type = trace.error_type
     error_message = trace.error_message.replace('"', '\\"')
     func = culprit.function if culprit else "unknown_func"

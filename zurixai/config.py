@@ -3,23 +3,13 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 
 @dataclass(frozen=True)
 class Config:
     """Immutable CLI configuration. Loaded from env vars + ~/.zurix/config.json."""
-
-    # --- Engine Server ---
-    engine_url: str = "http://localhost:8000"
-    api_key: str = ""
-
-    # --- Auth ---
-    jwt_token: str = ""
-
-    # --- Plan ---
-    plan: str = "free"  # free | pro | byok
 
     # --- Local paths ---
     config_dir: str = ""
@@ -30,12 +20,9 @@ class Config:
     json_output: bool = False
 
     @classmethod
-    def from_env(cls) -> "Config":
+    def from_env(cls) -> Config:
         config_dir = str(Path.home() / ".zurix")
         return cls(
-            engine_url=os.getenv("ZURIX_ENGINE_URL", "http://localhost:8000"),
-            api_key=os.getenv("ZURIX_API_KEY", ""),
-            plan=os.getenv("ZURIX_PLAN", "free"),
             config_dir=config_dir,
             rules_file=os.getenv("ZURIX_RULES_FILE", ".zurix/rules.md"),
             verbose=os.getenv("ZURIX_VERBOSE", "0") == "1",

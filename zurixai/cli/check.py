@@ -1,4 +1,4 @@
-"""zurix check — Run local quality checks on the current project."""
+"""zurix check — run all checks on a project directory."""
 
 from __future__ import annotations
 
@@ -12,10 +12,11 @@ from zurixai.ast.pypi_validator import validate_pypi_imports
 from zurixai.config import Config
 from zurixai.drift.sentinel import check_drift
 from zurixai.rules.parser import parse_rules
-from zurixai.supplychain.checker import check_supply_chain
+from zurixai.supplychain.checker import check_supply_chain, classify_undeclared
+
+CRITICAL_SUPPLY_SCORE = 3
 
 
-# ANSI color codes
 class _C:
     RESET = "\033[0m"
     BOLD = "\033[1m"
@@ -32,84 +33,98 @@ class _C:
             setattr(cls, attr, "")
 
 
-def cmd_check(cfg: Config, args: list[str]) -> None:
-    """Run free local checks, then optionally call engine for Pro features."""
-    project_dir = Path.cwd()
-    use_json = "--json" in args
-    pro_mode = "--pro" in args
-    use_color = "--no-color" not in args and sys.stdout.isatty()
-
-    if not use_color:
-        _C.disable()
-
-    start_time = time.time()
-
-    results: dict[str, object] = {
-        "project": str(project_dir),
-        "checks": {},
-        "pro": pro_mode,
+def run_checks(project_dir: Path, rules_file: str) -> dict:
+    """Run every check on project_dir and return the combined results."""
+    npm = validate_npm_imports(project_dir)
+    pypi = validate_pypi_imports(project_dir)
+    return {
+        "npm_imports": npm,
+        "pypi_imports": pypi,
+        "imports": classify_undeclared(npm["undeclared"], pypi["undeclared"]),
+        "supply_chain": check_supply_chain(project_dir),
+        "drift": check_drift(project_dir),
+        "rules": parse_rules(project_dir / rules_file),
     }
 
-    # --- 1. AST Import Validation ---
-    npm_result = validate_npm_imports(project_dir)
-    pypi_result = validate_pypi_imports(project_dir)
-    results["checks"]["npm_imports"] = npm_result
-    results["checks"]["pypi_imports"] = pypi_result
 
-    # --- 2. Supply-Chain Check ---
-    supply_result = check_supply_chain(project_dir)
-    results["checks"]["supply_chain"] = supply_result
+def count_critical(checks: dict) -> int:
+    invalid: int = checks.get("npm_imports", {}).get("invalid", 0) + checks.get("pypi_imports", {}).get("invalid", 0)
+    suspicious = sum(
+        1 for pkg in checks.get("supply_chain", {}).get("suspicious_packages", [])
+        if pkg.get("score", 0) >= CRITICAL_SUPPLY_SCORE
+    )
+    return invalid + suspicious
 
-    # --- 3. Drift Sentinel ---
-    drift_result = check_drift(project_dir)
-    results["checks"]["drift"] = drift_result
 
-    # --- 4. Rules Enforcement ---
-    rules_file = project_dir / cfg.rules_file
-    rules_result = parse_rules(rules_file)
-    results["checks"]["rules"] = rules_result
+def cmd_check(cfg: Config, path: str, *, use_json: bool, list_checks: bool, no_color: bool) -> int:
+    """Run checks and print results. Returns the process exit code."""
+    if no_color or not sys.stdout.isatty():
+        _C.disable()
+    if list_checks:
+        _print_check_list()
+        return 0
 
-    elapsed = time.time() - start_time
-    results["scan_time_seconds"] = round(elapsed, 2)
+    project_dir = Path(path).resolve()
+    if not project_dir.is_dir():
+        print(f"zurix check: not a directory: {path}", file=sys.stderr)
+        return 2
 
-    # --- Output ---
+    start = time.time()
+    checks = run_checks(project_dir, cfg.rules_file)
+    elapsed = time.time() - start
+    results = {"project": str(project_dir), "checks": checks, "scan_time_seconds": round(elapsed, 2)}
+
     if use_json:
         print(json.dumps(results, indent=2, default=str))
     else:
-        _print_results(results, pro_mode, elapsed)
+        _print_results(results, elapsed)
+    return 1 if count_critical(checks) else 0
 
 
-def _print_results(results: dict, pro_mode: bool, elapsed: float) -> None:
+def _install_hint(entry: dict) -> str:
+    return f"npm install {entry['package']}" if entry["source"] == "npm" else f"pip install {entry['package']}"
+
+
+def _print_imports(checks: dict, issues: list[tuple[str, str]]) -> None:
+    npm = checks.get("npm_imports", {})
+    pypi = checks.get("pypi_imports", {})
+    valid = npm.get("valid", 0) + pypi.get("valid", 0)
+    invalid = npm.get("invalid", 0) + pypi.get("invalid", 0)
+    imports = checks.get("imports", {"phantom": [], "undeclared": [], "unverified": []})
+
+    if invalid == 0:
+        print(f"\n  {_C.GREEN}✓{_C.RESET} Imports: {_C.GREEN}{valid}/{valid} declared{_C.RESET}")
+        return
+
+    print(f"\n  {_C.RED}✗{_C.RESET} Imports: {_C.RED}{invalid} not declared{_C.RESET} ({valid}/{valid + invalid} declared)")
+    for entry in imports["phantom"]:
+        files = ", ".join(entry["files"][:3])
+        issues.append(("critical", f"Phantom import: {entry['name']}"))
+        print(f"    {_C.RED}•{_C.RESET} {_C.RED}CRITICAL{_C.RESET} phantom: {entry['name']} "
+              f"— {entry['package']} not found on {entry['source']} ({files})")
+        print(f"      {_C.DIM}Fix: remove it or replace it with a package that exists{_C.RESET}")
+    for entry in imports["undeclared"]:
+        files = ", ".join(entry["files"][:3])
+        issues.append(("critical", f"Missing dependency: {entry['name']}"))
+        print(f"    {_C.RED}•{_C.RESET} {_C.RED}CRITICAL{_C.RESET} missing dependency: {entry['name']} ({files})")
+        print(f"      {_C.DIM}Fix: {_install_hint(entry)} and add it to your manifest{_C.RESET}")
+    for entry in imports["unverified"]:
+        issues.append(("warning", f"Unverified import: {entry['name']}"))
+        print(f"    {_C.YELLOW}•{_C.RESET} {_C.YELLOW}WARNING{_C.RESET} {entry['name']}: "
+              f"not declared, registry unreachable — could not tell if it exists")
+
+
+def _print_results(results: dict, elapsed: float) -> None:
     """Pretty-print check results to terminal with colors and severity."""
     checks = results["checks"]
-    issues = []  # collect all issues for summary
+    issues: list[tuple[str, str]] = []
 
     print()
     print(f"{_C.BOLD}{'═' * 56}{_C.RESET}")
     print(f"{_C.BOLD}  ZurixAI Check Results{_C.RESET}")
     print(f"{_C.BOLD}{'═' * 56}{_C.RESET}")
 
-    # --- AST Imports ---
-    npm = checks.get("npm_imports", {})
-    pypi = checks.get("pypi_imports", {})
-    npm_valid = npm.get("valid", 0)
-    npm_invalid = npm.get("invalid", 0)
-    pypi_valid = pypi.get("valid", 0)
-    pypi_invalid = pypi.get("invalid", 0)
-    total_imports = npm_valid + pypi_valid + npm_invalid + pypi_invalid
-
-    if npm_invalid + pypi_invalid == 0:
-        print(f"\n  {_C.GREEN}✓{_C.RESET} Imports: {_C.GREEN}{npm_valid + pypi_valid}/{total_imports} valid{_C.RESET}")
-    else:
-        print(f"\n  {_C.RED}✗{_C.RESET} Imports: {_C.RED}{npm_invalid + pypi_invalid} invalid{_C.RESET} ({npm_valid + pypi_valid}/{total_imports} valid)")
-        for imp in npm.get("invalid_imports", []):
-            issues.append(("critical", f"Missing npm dependency: {imp}"))
-            print(f"    {_C.RED}•{_C.RESET} {_C.RED}CRITICAL{_C.RESET} Missing npm dependency: {imp}")
-            print(f"      {_C.DIM}Fix: npm install {imp.split(' (')[0]}{_C.RESET}")
-        for imp in pypi.get("invalid_imports", []):
-            issues.append(("critical", f"Missing PyPI dependency: {imp}"))
-            print(f"    {_C.RED}•{_C.RESET} {_C.RED}CRITICAL{_C.RESET} Missing PyPI dependency: {imp}")
-            print(f"      {_C.DIM}Fix: pip install {imp.split(' (')[0]}{_C.RESET}")
+    _print_imports(checks, issues)
 
     # --- Supply Chain ---
     supply = checks.get("supply_chain", {})
@@ -124,7 +139,7 @@ def _print_results(results: dict, pro_mode: bool, elapsed: float) -> None:
     elif suspicious:
         print(f"  {_C.YELLOW}!{_C.RESET} Supply Chain: {_C.YELLOW}{suspicious} suspicious{_C.RESET} ({supply.get('checked', 0)} checked)")
         for pkg in supply.get("suspicious_packages", []):
-            severity = "warning" if pkg.get("score", 0) < 3 else "critical"
+            severity = "critical" if pkg.get("score", 0) >= CRITICAL_SUPPLY_SCORE else "warning"
             issues.append((severity, f"Suspicious package: {pkg['name']} ({', '.join(pkg.get('reasons', []))})"))
             color = _C.YELLOW if severity == "warning" else _C.RED
             label = "WARNING" if severity == "warning" else "CRITICAL"
@@ -166,7 +181,6 @@ def _print_results(results: dict, pro_mode: bool, elapsed: float) -> None:
     info = sum(1 for s, _ in issues if s == "info")
 
     print(f"\n{_C.BOLD}{'─' * 56}{_C.RESET}")
-
     if critical + warnings + info == 0:
         print(f"  {_C.GREEN}{_C.BOLD}All checks passed{_C.RESET} {_C.DIM}({elapsed:.1f}s){_C.RESET}")
     else:
@@ -178,11 +192,23 @@ def _print_results(results: dict, pro_mode: bool, elapsed: float) -> None:
         if info:
             parts.append(f"{_C.BLUE}{info} info{_C.RESET}")
         print(f"  {_C.BOLD}Summary:{_C.RESET} {', '.join(parts)} {_C.DIM}({elapsed:.1f}s){_C.RESET}")
-
-    # --- Pro upsell ---
-    if not pro_mode:
-        print(f"\n  {_C.DIM}Run 'zurix check --pro' for LLM-powered patches{_C.RESET}")
-    else:
-        print(f"\n  {_C.DIM}Pro mode: Connect engine for LLM-powered fixes{_C.RESET}")
-
     print(f"{'═' * 56}\n")
+
+
+def _print_check_list() -> None:
+    """List all available check types."""
+    checks = [
+        ("npm_imports", "JS/TS imports vs package.json"),
+        ("pypi_imports", "Python imports vs pyproject.toml / requirements / setup.py"),
+        ("imports", "Undeclared imports looked up on npm/PyPI: phantom vs missing"),
+        ("supply_chain", "Declared dependencies: registry status, typosquatting"),
+        ("drift", "Orphaned functions and stale files"),
+        ("rules", "Custom rules from .zurix/rules.md (loaded, not enforced yet)"),
+    ]
+    print()
+    print(f"{_C.BOLD}Available check types:{_C.RESET}")
+    print()
+    for name, desc in checks:
+        print(f"  {_C.GREEN}{name}{_C.RESET}")
+        print(f"    {_C.DIM}{desc}{_C.RESET}")
+    print()

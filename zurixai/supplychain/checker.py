@@ -6,13 +6,16 @@ import json
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Any
 
 import httpx
+
+from zurixai.manifests import distribution_spellings, python_declared_deps
 
 
 def check_supply_chain(project_dir: Path) -> dict:
     """Check dependencies for typosquatting, suspicious patterns, and registry metadata."""
-    result = {
+    result: dict[str, Any] = {
         "checked": 0,
         "suspicious": 0,
         "unavailable": 0,
@@ -27,8 +30,8 @@ def check_supply_chain(project_dir: Path) -> dict:
         return result
 
     # Check each package for local patterns first
-    local_suspicious = {}
-    for pkg_name, pkg_source in packages.items():
+    local_suspicious: dict[str, tuple[int, list[str]]] = {}
+    for pkg_name in packages:
         suspicion_score = 0
         reasons: list[str] = []
 
@@ -65,7 +68,7 @@ def check_supply_chain(project_dir: Path) -> dict:
     for pkg_name, pkg_source in packages.items():
         result["checked"] += 1
         suspicion_score = 0
-        reasons: list[str] = []
+        reasons = []
 
         # Local pattern checks
         if pkg_name in local_suspicious:
@@ -101,40 +104,59 @@ def check_supply_chain(project_dir: Path) -> dict:
     return result
 
 
+def classify_undeclared(npm_undeclared: dict, pypi_undeclared: dict) -> dict:
+    """Look up undeclared imports in their registry.
+
+    phantom    — the package does not exist in the registry (hallucinated)
+    undeclared — it exists but is missing from the manifest
+    unverified — the registry could not be reached
+    """
+    result: dict[str, list[dict]] = {"phantom": [], "undeclared": [], "unverified": []}
+    lookups = [("npm", name, info) for name, info in npm_undeclared.items()]
+    lookups += [("pypi", name, info) for name, info in pypi_undeclared.items()]
+    if not lookups:
+        return result
+
+    def lookup(item: tuple[str, str, dict]) -> tuple[str, str]:
+        source, name, info = item
+        if source == "npm":
+            return _check_npm_registry(info["package"])["status"], info["package"]
+        status = _check_pypi_registry(info["package"])["status"]
+        if status != "not_found":
+            return status, info["package"]
+        # Before calling it a phantom, try the usual alternate spellings (markdown_it → markdown-it-py).
+        for alternate in distribution_spellings(name)[1:]:
+            alt_status = _check_pypi_registry(alternate)["status"]
+            if alt_status != "not_found":
+                return alt_status, alternate
+        return "not_found", info["package"]
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        outcomes = list(executor.map(lookup, lookups))
+
+    bucket = {"not_found": "phantom", "ok": "undeclared"}
+    for (source, name, info), (status, package) in zip(lookups, outcomes, strict=True):
+        entry = {"name": name, "package": package, "source": source, "files": info["files"]}
+        result[bucket.get(status, "unverified")].append(entry)
+    return result
+
+
 def _collect_packages(project_dir: Path) -> dict[str, str]:
-    """Collect package names from package.json, pyproject.toml, and requirements.txt."""
+    """Collect declared package names from package.json and the Python manifests."""
     packages: dict[str, str] = {}
 
-    # package.json
     package_json = project_dir / "package.json"
     if package_json.exists():
         try:
             data = json.loads(package_json.read_text())
-            for dep in list(data.get("dependencies", {}).keys()):
-                packages[dep] = "npm"
-            for dep in list(data.get("devDependencies", {}).keys()):
-                packages[dep] = "npm"
-        except (json.JSONDecodeError, KeyError):
+            for field in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies"):
+                for dep in data.get(field) or {}:
+                    packages[dep] = "npm"
+        except json.JSONDecodeError:
             pass
 
-    # pyproject.toml
-    pyproject = project_dir / "pyproject.toml"
-    if pyproject.exists():
-        content = pyproject.read_text()
-        for match in re.finditer(
-            r'"([a-zA-Z0-9_-]+)(?:\[.*?\])?(?:>=.*?|<.*?|~=.*?|!=.*?|==.*?)"', content
-        ):
-            pkg_name = match.group(1).lower().replace("_", "-")
-            packages[pkg_name] = "pypi"
-
-    # requirements.txt
-    req_file = project_dir / "requirements.txt"
-    if req_file.exists():
-        for line in req_file.read_text().splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and not line.startswith("-"):
-                pkg_name = re.split(r"[>=<~!]", line)[0].strip()
-                packages[pkg_name] = "pypi"
+    for dep in python_declared_deps(project_dir):
+        packages[dep] = "pypi"
 
     return packages
 

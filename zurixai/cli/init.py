@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 from zurixai.config import Config
@@ -23,9 +22,6 @@ def cmd_init(cfg: Config, args: list[str]) -> None:
     if not config_file.exists():
         default_config = {
             "project_name": project_dir.name,
-            "engine_url": cfg.engine_url,
-            "api_key": cfg.api_key or "YOUR_API_KEY_HERE",
-            "plan": "free",
             "checks": {
                 "ast_imports": True,
                 "supply_chain": True,
@@ -73,10 +69,5 @@ def cmd_init(cfg: Config, args: list[str]) -> None:
     print(f"Rules: {rules_file}")
     print("\nNext steps:")
     print("1. Edit .zurix/rules.md to add your custom rules")
-    print("2. Set your API key: export ZURIX_API_KEY=your_key")
-    print("3. Run: zurix check")
-    print("\nFor Pro features (LLM-powered patches):")
-    print("1. Get your API key at https://zurixai.com/pricing")
-    print("2. Set: export ZURIX_API_KEY=your_pro_key")
-    print("3. Run: zurix check --pro")
+    print("2. Run: zurix check")
     print("=" * 50)

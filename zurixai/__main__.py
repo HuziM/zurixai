@@ -1,39 +1,64 @@
-"""Entry point for python -m zurixai."""
+"""Entry point for `zurix` / `python -m zurixai`."""
 
 from __future__ import annotations
 
+import argparse
 import sys
 
-from zurixai.cli.check import cmd_check
-from zurixai.cli.init import cmd_init
+from zurixai import __version__
 from zurixai.config import get_config
 
 
-def main() -> None:
-    cfg = get_config()
-    args = sys.argv[1:]
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="zurix",
+        description="Catch phantom imports, broken packages and drift in AI-written code.",
+    )
+    parser.add_argument("--version", action="version", version=f"zurixai {__version__}")
+    commands = parser.add_subparsers(dest="command", metavar="<command>")
 
-    if not args:
-        print("Usage: zurix <command>")
-        print("Commands: check, init, scan, tui, version")
-        sys.exit(1)
+    check = commands.add_parser(
+        "check", help="run all checks on a project",
+        description="Run all checks. Exits 1 when critical issues are found.",
+    )
+    check.add_argument("path", nargs="?", default=".", help="project directory (default: current directory)")
+    check.add_argument("--json", action="store_true", help="print machine-readable JSON")
+    check.add_argument("--list", action="store_true", help="list available checks and exit")
+    check.add_argument("--no-color", action="store_true", help="disable colored output")
 
-    command = args[0]
+    init = commands.add_parser("init", help="create .zurix/config.json and .zurix/rules.md")
+    init.add_argument("args", nargs=argparse.REMAINDER)
 
-    if command == "check":
-        cmd_check(cfg, args[1:])
-    elif command == "init":
-        cmd_init(cfg, args[1:])
-    elif command == "version":
-        from zurixai import __version__
-        print(f"zurixai {__version__}")
-    elif command == "tui":
+    verify = commands.add_parser("verify", help="verify a signed audit report")
+    verify.add_argument("args", nargs=argparse.REMAINDER, help="<audit.json> [--key <pubkey_hex>] [--no-color]")
+
+    commands.add_parser("tui", help="open the terminal dashboard")
+    commands.add_parser("version", help="print the version")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = _parser()
+    ns = parser.parse_args(argv)
+
+    if ns.command == "check":
+        from zurixai.cli.check import cmd_check
+        sys.exit(cmd_check(get_config(), ns.path, use_json=ns.json, list_checks=ns.list, no_color=ns.no_color))
+    if ns.command == "init":
+        from zurixai.cli.init import cmd_init
+        cmd_init(get_config(), ns.args)
+    elif ns.command == "verify":
+        from zurixai.cli.verify import cmd_verify
+        cmd_verify(ns.args)
+    elif ns.command == "tui":
         from zurixai.tui.app import run_tui
         run_tui()
+    elif ns.command == "version":
+        print(f"zurixai {__version__}")
     else:
-        print(f"Unknown command: {command}")
-        print("Commands: check, init, scan, tui, version")
+        parser.print_help()
         sys.exit(1)
+    sys.exit(0)
 
 
 if __name__ == "__main__":
