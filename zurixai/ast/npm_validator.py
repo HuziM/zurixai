@@ -6,96 +6,98 @@ import json
 import re
 from pathlib import Path
 
+from zurixai.walk import iter_source_files
 
-# Node.js built-in modules (both bare and node: protocol)
 NODEJS_BUILTINS = frozenset({
-    "assert", "buffer", "child_process", "cluster", "console", "constants",
-    "crypto", "dgram", "dns", "domain", "events", "fs", "http", "http2",
-    "https", "inspector", "module", "net", "os", "path", "perf_hooks",
-    "process", "punycode", "querystring", "readline", "repl", "stream",
-    "string_decoder", "sys", "timers", "tls", "trace_events", "tty",
-    "url", "util", "v8", "vm", "worker_threads", "zlib",
-    # node: protocol builtins
-    "node:assert", "node:assert/strict", "node:async_hooks", "node:buffer",
-    "node:child_process", "node:cluster", "node:console", "node:constants",
-    "node:crypto", "node:dgram", "node:diagnostics_channel", "node:dns",
-    "node:domain", "node:events", "node:fs", "node:http", "node:http2",
-    "node:https", "node:inspector", "node:module", "node:net", "node:os",
-    "node:path", "node:perf_hooks", "node:process", "node:punycode",
-    "node:querystring", "node:readline", "node:repl", "node:stream",
-    "node:string_decoder", "node:test", "node:timers", "node:tls",
-    "node:trace_events", "node:tty", "node:url", "node:util", "node:v8",
-    "node:vm", "node:worker_threads", "node:zlib",
+    "assert", "async_hooks", "buffer", "child_process", "cluster", "console", "constants",
+    "crypto", "dgram", "diagnostics_channel", "dns", "domain", "events", "fs", "http", "http2",
+    "https", "inspector", "module", "net", "os", "path", "perf_hooks", "process", "punycode",
+    "querystring", "readline", "repl", "stream", "string_decoder", "sys", "test", "timers",
+    "tls", "trace_events", "tty", "url", "util", "v8", "vm", "wasi", "worker_threads", "zlib",
 })
+
+JS_SUFFIXES = {".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs", ".mts", ".cts"}
+
+_SPEC = r"""['"]([^'"\n]+)['"]"""
+IMPORT_PATTERN = re.compile(
+    rf"""\bimport\s+(?:type\s+)?[^'";]*?\bfrom\s*{_SPEC}"""  # import x / { a,\n b } from 'p'
+    rf"""|\bexport\s+[^'";]*?\bfrom\s*{_SPEC}"""             # export { a } / * from 'p'
+    rf"""|\bimport\s*{_SPEC}"""                              # import 'p' (side effect)
+    rf"""|\brequire\s*\(\s*{_SPEC}\s*\)"""                   # require('p')
+    rf"""|\bimport\s*\(\s*{_SPEC}\s*\)"""                    # import('p')
+)
+
+_DEP_FIELDS = ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies")
+_COMMENTS = re.compile(r"/\*.*?\*/|^\s*//[^\n]*", re.DOTALL | re.MULTILINE)
+_VALID_NAME = re.compile(r"^(?:@[A-Za-z0-9][\w.~-]*/)?[A-Za-z0-9][\w.~-]*$")
+
+
+def _package_name(specifier: str) -> str:
+    parts = specifier.split("/")
+    return "/".join(parts[:2]) if parts[0].startswith("@") else parts[0]
+
+
+def _load_manifests(project_dir: Path) -> dict[Path, dict]:
+    """Every package.json in the project (monorepo sub-packages included), keyed by directory."""
+    manifests: dict[Path, dict] = {}
+    for path in iter_source_files(project_dir, {".json"}):
+        if path.name != "package.json":
+            continue
+        try:
+            manifests[path.parent] = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+    return manifests
+
+
+def _declared_for(source: Path, project_dir: Path, manifests: dict[Path, dict]) -> set[str]:
+    """Deps declared in package.json files from the source's folder up to the project root."""
+    declared: set[str] = set()
+    folder = source.parent
+    while True:
+        data = manifests.get(folder, {})
+        declared.update(name for field in _DEP_FIELDS for name in (data.get(field) or {}))
+        if folder == project_dir or project_dir not in folder.parents:
+            return declared
+        folder = folder.parent
 
 
 def validate_npm_imports(project_dir: Path) -> dict:
-    """Scan JS/TS files for npm imports and validate against package.json + registry."""
-    result = {"valid": 0, "invalid": 0, "invalid_imports": [], "checked_files": 0}
+    """Scan JS/TS files for package imports and validate them against package.json."""
+    result: dict = {"valid": 0, "invalid": 0, "invalid_imports": [], "undeclared": {}, "checked_files": 0}
 
-    # Find package.json
-    package_json = project_dir / "package.json"
-    if not package_json.exists():
+    if not (project_dir / "package.json").exists():
         return result
+    manifests = _load_manifests(project_dir)
+    local_names = {data["name"] for data in manifests.values() if isinstance(data.get("name"), str)}
 
-    try:
-        pkg_data = json.loads(package_json.read_text())
-        declared_deps = set(pkg_data.get("dependencies", {}).keys())
-        declared_dev_deps = set(pkg_data.get("devDependencies", {}).keys())
-        all_deps = declared_deps | declared_dev_deps
-        project_name = pkg_data.get("name", "")
-    except (json.JSONDecodeError, KeyError):
-        return result
-
-    # Find JS/TS files
-    js_patterns = ["**/*.js", "**/*.ts", "**/*.jsx", "**/*.tsx", "**/*.mjs", "**/*.cjs"]
-    scanned_files: set[Path] = set()
-    for pattern in js_patterns:
-        for f in project_dir.glob(pattern):
-            if "node_modules" in str(f) or ".zurix" in str(f):
-                continue
-            scanned_files.add(f)
-
-    # Parse imports from each file
-    import_pattern = re.compile(
-        r"""(?:import\s+.*?from\s+['"]([^'"]+)['"]|"""
-        r"""require\s*\(\s*['"]([^'"]+)['"]\s*\)|"""
-        r"""import\s*\(\s*['"]([^'"]+)['"]\s*\))"""
-    )
-
-    for f in scanned_files:
+    for source in iter_source_files(project_dir, JS_SUFFIXES):
         result["checked_files"] += 1
         try:
-            content = f.read_text(errors="ignore")
-        except Exception:
+            content = _COMMENTS.sub("", source.read_text(errors="ignore"))
+        except OSError:
             continue
 
-        for match in import_pattern.finditer(content):
-            pkg = match.group(1) or match.group(2) or match.group(3)
-            if not pkg or pkg.startswith(".") or pkg.startswith("/"):
+        declared = _declared_for(source, project_dir, manifests)
+        rel = source.relative_to(project_dir).as_posix()
+        for match in IMPORT_PATTERN.finditer(content):
+            specifier = next(g for g in match.groups() if g)
+            if specifier.startswith((".", "/")) or ":" in specifier:
+                continue
+            if specifier.split("/")[0] in NODEJS_BUILTINS:
                 continue
 
-            # Skip node: protocol and bare Node.js built-in imports
-            if pkg in NODEJS_BUILTINS or pkg.startswith("node:"):
+            name = _package_name(specifier)
+            if not _VALID_NAME.match(name) or name in local_names:
                 continue
-
-            # Extract package name (handle @scope/pkg)
-            parts = pkg.split("/")
-            if parts[0].startswith("@"):
-                pkg_name = "/".join(parts[:2])
-            else:
-                pkg_name = parts[0]
-
-            # Skip self-imports (package importing itself)
-            if pkg_name == project_name:
-                continue
-
-            # Check if it's a known dependency or a hallucinated one
-            if pkg_name in all_deps:
+            if name in declared:
                 result["valid"] += 1
-            else:
-                # Likely a hallucinated or missing dependency
-                result["invalid"] += 1
-                result["invalid_imports"].append(f"{pkg_name} (from {f.name})")
+                continue
+
+            result["invalid"] += 1
+            result["invalid_imports"].append(f"{name} (from {source.name})")
+            entry = result["undeclared"].setdefault(name, {"package": name, "files": []})
+            if rel not in entry["files"]:
+                entry["files"].append(rel)
 
     return result

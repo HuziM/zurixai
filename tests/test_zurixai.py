@@ -142,6 +142,34 @@ def test_registry_outcomes(tmp_path, source, status, expected):
     assert result["suspicious"] == int(expected == "not_found")
 
 
+@pytest.mark.parametrize("source", ["npm", "pypi"])
+@pytest.mark.parametrize("failure", ["timeout", "malformed"])
+def test_registry_failure_reporting(tmp_path, capsys, source, failure):
+    import httpx
+
+    from zurixai.cli.check import _print_results
+
+    if source == "npm":
+        (tmp_path / "package.json").write_text(json.dumps({"dependencies": {"requests": "1"}}))
+    else:
+        (tmp_path / "requirements.txt").write_text("requests\n")
+    with patch("zurixai.supplychain.checker.httpx.get") as get:
+        if failure == "timeout":
+            get.side_effect = httpx.ReadTimeout("registry unavailable")
+        else:
+            get.return_value = httpx.Response(200, text="invalid json")
+        supply = check_supply_chain(tmp_path)
+    assert supply["unavailable"] == 1
+    assert supply["suspicious"] == 0
+    results = {"supply_chain": supply}
+    _print_results({"checks": results}, 0.1)
+    output = capsys.readouterr().out
+    assert "incomplete" in output
+    assert "packages OK" not in output
+    assert "All checks passed" not in output
+    assert "0 suspicious" not in output
+
+
 class TestDriftSentinel:
     """Tests for drift sentinel."""
 

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 from textual.app import App, ComposeResult
-from textual.binding import Binding
+from textual.binding import Binding, BindingType
 from textual.widgets import Footer, Header, Static
 
 STATUS_TEXT = (
@@ -22,9 +24,9 @@ class ZurixDashboard(App):
     TITLE = "ZurixAI"
     SUB_TITLE = "Agentic Quality Engine"
 
-    BINDINGS = (
+    BINDINGS: ClassVar[list[BindingType]] = [
         Binding("q", "quit", "Quit", show=True),
-    )
+    ]
 
     def compose(self) -> ComposeResult:
         yield Header()

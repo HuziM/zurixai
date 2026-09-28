@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Any
 
 
 def parse_rules(rules_file: Path) -> dict:
     """Parse .zurix/rules.md and extract structured rules."""
-    result = {
+    result: dict[str, Any] = {
         "rule_count": 0,
         "rules": [],
         "sections": [],
@@ -22,7 +23,7 @@ def parse_rules(rules_file: Path) -> dict:
 
     try:
         content = rules_file.read_text()
-    except Exception:
+    except (OSError, UnicodeDecodeError):
         return result
 
     # Parse sections and their rules
@@ -40,9 +41,8 @@ def parse_rules(rules_file: Path) -> dict:
 
         # Parse rules (lines starting with -, *, or numbered)
         rule_text = None
-        if stripped.startswith("- ") or stripped.startswith("* "):
-            rule_text = stripped[2:].strip()
-        elif len(stripped) > 2 and stripped[0].isdigit() and stripped[1] in (".", ")"):
+        numbered = len(stripped) > 2 and stripped[0].isdigit() and stripped[1] in (".", ")")
+        if stripped.startswith(("- ", "* ")) or numbered:
             rule_text = stripped[2:].strip()
         elif stripped.startswith("- ["):
             # Checkbox: - [ ] or - [x]

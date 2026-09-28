@@ -157,10 +157,10 @@ def _parse_js_traceback(raw: str) -> ParsedTrace | None:
         line = line.strip()
         if not line or line.startswith("at "):
             continue
-        m = _JS_ERROR.match(line)
-        if m:
-            error_type = m.group("type") or ""
-            error_message = (m.group("message") or "").strip()
+        err = _JS_ERROR.match(line)
+        if err:
+            error_type = err.group("type") or ""
+            error_message = (err.group("message") or "").strip()
             break
 
     return ParsedTrace(

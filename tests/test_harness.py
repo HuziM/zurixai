@@ -8,7 +8,6 @@ import subprocess
 import time
 from pathlib import Path
 
-
 REPOS = {
     "nanoid": "https://github.com/ai/nanoid.git",
     "es-toolkit": "https://github.com/toss/es-toolkit.git",
@@ -33,9 +32,9 @@ def run_checks(repo_dir: Path) -> dict:
     """Run all ZurixAI checks on a repository."""
     from zurixai.ast.npm_validator import validate_npm_imports
     from zurixai.ast.pypi_validator import validate_pypi_imports
-    from zurixai.supplychain.checker import check_supply_chain
     from zurixai.drift.sentinel import check_drift
     from zurixai.rules.parser import parse_rules
+    from zurixai.supplychain.checker import check_supply_chain
 
     start = time.time()
 

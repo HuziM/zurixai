@@ -15,7 +15,7 @@ jobs:
       - name: Check for forbidden names
         run: |
           FORBIDDEN="solvent|SOLVENT|Solvent Agent|engine\.api|engine\.auth|engine\.audit|engine\.llm|engine\.billing|engine\.pricing|engine\.middleware|engine\.memory|engine\.patching|engine\.sentry"
-          if grep -rniE "$FORBIDDEN" --include="*.py" --include="*.toml" --include="*.yaml" --include="*.yml" --include="*.md" --include="*.json" .; then
+          if grep -rniE "$FORBIDDEN" --exclude-dir=.github --include="*.py" --include="*.toml" --include="*.yaml" --include="*.yml" --include="*.md" --include="*.json" .; then
             echo "FAIL: forbidden names found in codebase"
             exit 1
           fi
