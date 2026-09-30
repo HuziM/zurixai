@@ -63,6 +63,7 @@ class ChainResult:
     errors: list[str] = field(default_factory=list)
     first_index: int | None = None
     last_index: int | None = None
+    renames: list[str] = field(default_factory=list)
 
     @property
     def partial(self) -> bool:
@@ -99,16 +100,16 @@ def verify_entry(entry: dict[str, Any], pubkey_hex: str) -> EntryResult:
 
 
 def verify_chain(entries: list[dict[str, Any]], pubkey_hex: str) -> ChainResult:
-    """Verify every entry, then that indexes are contiguous and each prev_hash links to the entry before."""
+    """Verify every entry, then that indexes are contiguous and each prev_hash links to the entry before.
+
+    The repo name may change along a chain (rename or transfer); the hash links make it one chain.
+    """
     ordered = sorted(entries, key=lambda e: e.get("chain_index", -1))
     result = ChainResult(entries=[verify_entry(e, pubkey_hex) for e in ordered])
     if not ordered:
         result.errors.append("No entries.")
         return result
 
-    repos = {e.get("repo") for e in ordered}
-    if len(repos) > 1:
-        result.errors.append(f"Entries from more than one repo: {', '.join(sorted(map(str, repos)))}.")
 
     result.first_index = ordered[0].get("chain_index")
     result.last_index = ordered[-1].get("chain_index")
@@ -121,4 +122,6 @@ def verify_chain(entries: list[dict[str, Any]], pubkey_hex: str) -> ChainResult:
             result.errors.append(f"Chain index jumps from {p} to {c}: an entry is missing or duplicated.")
         elif cur.get("prev_hash") != prev.get("entry_hash"):
             result.errors.append(f"Entry {c} does not link to entry {p} (prev_hash mismatch).")
+        elif cur.get("repo") != prev.get("repo"):
+            result.renames.append(f"{prev.get('repo')} → {cur.get('repo')} at entry {c}")
     return result

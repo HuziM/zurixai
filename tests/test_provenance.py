@@ -126,7 +126,16 @@ def test_partial_range_is_allowed_but_flagged() -> None:
     assert result.ok and result.partial and result.first_index == 2
 
 
-def test_entries_from_two_repos_are_rejected() -> None:
+def test_entries_from_two_chains_are_rejected() -> None:
     key = Ed25519PrivateKey.generate()
     a, b = make_chain(key, 1, "o/a")[0], make_chain(key, 2, "o/b")[1]
     assert not verify_chain([a, b], pubkey_hex(key)).ok
+
+
+def test_chain_across_a_rename_verifies_and_reports_it() -> None:
+    key = Ed25519PrivateKey.generate()
+    first = make_chain(key, 1, "old/name")[0]
+    payload = {k: v for k, v in make_chain(key, 2, "new/name")[1].items() if k in SIGNED_FIELDS}
+    payload["prev_hash"] = first["entry_hash"]
+    result = verify_chain([first, sign(key, payload)], pubkey_hex(key))
+    assert result.ok and result.renames == ["old/name → new/name at entry 1"]

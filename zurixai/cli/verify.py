@@ -167,6 +167,8 @@ def cmd_verify(args: list[str]) -> None:
         else:
             span = f"index {chain.first_index}..{chain.last_index}"
             print(f"  {_mark(True)} Chain: {_C.GREEN}linked{_C.RESET} ({len(chain.entries)} entries, {span})")
+            for rename in chain.renames:
+                print(f"  {_C.DIM}Repo renamed or moved: {rename}{_C.RESET}")
             if chain.partial:
                 print(f"  {_C.YELLOW}!{_C.RESET} Partial range: entries before {chain.first_index} "
                       "are not in this file, so its start can't be checked.")
