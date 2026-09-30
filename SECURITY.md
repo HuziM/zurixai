@@ -2,10 +2,9 @@
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability, please report it responsibly:
-
-1. **GitHub Private Vulnerability Reporting**: Use the "Report a vulnerability" tab on the [GitHub repository](https://github.com/HuziM/zurixai/security/advisories/new)
-2. **Email**: security@zurixai.com
+If you discover a security vulnerability, please report it privately through
+[GitHub Private Vulnerability Reporting](https://github.com/HuziM/zurixai/security/advisories/new)
+(Security tab, then "Report a vulnerability").
 
 Please include:
 - Description of the vulnerability
@@ -32,13 +31,14 @@ We do **not** store:
 The ZurixAI GitHub App requests these permissions:
 - **Contents**: Read (to clone repos for analysis)
 - **Checks**: Write (to post check results on PRs)
-- **Pull requests**: Read (to read PR metadata)
+- **Pull requests**: Write (to post review comments and dismiss stale reviews)
+- **Metadata**: Read (repository info)
 
 ## Data Retention
 
 - Check results: retained for the duration of the service
 - Audit logs: retained while the account is active
-- On uninstall: all data is purged within 30 days
+- On uninstall: new data stops. Contact us to request deletion of existing data.
 
 ## Signed Audit Reports
 
@@ -52,4 +52,4 @@ The signed payload includes what was checked, not just that a run happened.
 
 ## Verified
 
-This security policy was last reviewed on September 19, 2026.
+This security policy was last reviewed on September 30, 2026.
