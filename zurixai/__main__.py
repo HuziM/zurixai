@@ -29,8 +29,10 @@ def _parser() -> argparse.ArgumentParser:
     init = commands.add_parser("init", help="create .zurix/config.json and .zurix/rules.md")
     init.add_argument("args", nargs=argparse.REMAINDER)
 
-    verify = commands.add_parser("verify", help="verify a signed audit report")
-    verify.add_argument("args", nargs=argparse.REMAINDER, help="<audit.json> [--key <pubkey_hex>] [--no-color]")
+    verify = commands.add_parser("verify", help="verify a signed audit entry or an exported audit log")
+    verify.add_argument("path", nargs="?", help="audit.json (one entry) or log.jsonl / JSON array (a chain)")
+    verify.add_argument("--key", help="public key hex (default: fetched from zurixai.com)")
+    verify.add_argument("--no-color", action="store_true", help="disable colored output")
 
     commands.add_parser("tui", help="open the terminal dashboard")
     commands.add_parser("version", help="print the version")
@@ -49,7 +51,8 @@ def main(argv: list[str] | None = None) -> None:
         cmd_init(get_config(), ns.args)
     elif ns.command == "verify":
         from zurixai.cli.verify import cmd_verify
-        cmd_verify(ns.args)
+        cmd_verify(([ns.path] if ns.path else []) + (["--key", ns.key] if ns.key else [])
+                   + (["--no-color"] if ns.no_color else []))
     elif ns.command == "tui":
         from zurixai.tui.app import run_tui
         run_tui()

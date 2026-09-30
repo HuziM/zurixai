@@ -1,0 +1,38 @@
+{
+  "pubkey_hex": "93446d79173d9d6c4759658f00242e8d19543cf8ce97d8ec789a24c709bd40b7",
+  "entry": {
+    "repo": "HuziM/zurixai-test",
+    "chain_index": 0,
+    "key_id": "5103e9100cb038e8",
+    "prev_hash": "",
+    "timestamp": "2026-09-30T14:51:05.383926+00:00",
+    "tool_version": "0.4.0",
+    "entry_hash": "1692cfaafbc4a224b78b55dfcdb48cfa572f2666decb7046a3439118e5cffdff",
+    "signature": "3iEzpxr38VxmihHLbjhorW+ZjDLofIGQDkqw72YgTAEwazy5XIYBQWhgC7V3ybxY2FkntzYn9DIqDvaUAei+Cw==",
+    "head_commit_sha": "79ec07ef6a8132094f1d447b6e4e530b1961c021",
+    "pr": 6,
+    "rules_hash": "dc794d814f94d0a83d3f072a1ab51e3cfadf38f74da94f90ba8b6d8493e27379",
+    "source": "server-run",
+    "conclusion": "failure",
+    "checks": [
+      {
+        "status": "fail",
+        "check_id": "imports",
+        "check_version": "1.0.0",
+        "findings_hash": "f0c21b457b7c239f58e70729312d7e26b6e860937a91aeb479b4bf68be4b3e10"
+      },
+      {
+        "status": "pass",
+        "check_id": "supply_chain",
+        "check_version": "1.0.0",
+        "findings_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      },
+      {
+        "status": "warn",
+        "check_id": "drift",
+        "check_version": "1.0.0",
+        "findings_hash": "1c9f4f2e951d0191a84c8be61f5e8914a5651c085c7400053a545b5619570d5f"
+      }
+    ]
+  }
+}

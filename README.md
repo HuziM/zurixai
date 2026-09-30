@@ -29,10 +29,12 @@ zurix check .
 zurix check [PATH]     # Run all checks (default: current directory)
 zurix check --json     # Machine-readable output
 zurix init             # Scaffold .zurix/config.json + rules.md
-zurix verify <audit.json> [--key <pubkey_hex>]   # Verify a signed audit report
+zurix verify <audit.json | log.jsonl> [--key <pubkey_hex>]   # Verify a signed entry or a whole audit log
 zurix tui              # Open interactive dashboard
 zurix --help           # All commands and options
 ```
+
+`zurix verify` checks each entry's Ed25519 signature and its own hash. Given a whole log (a JSON array or one entry per line), it also checks that chain indexes are contiguous and that each entry's `prev_hash` is the previous entry's hash, so a dropped, reordered or altered entry fails. Without `--key`, the public key is fetched from https://zurixai.com/.well-known/zurixai-pubkey.
 
 `zurix check` exits `1` when it finds critical issues (phantom or undeclared imports, packages missing from their registry), so it can gate CI. No API key or account is needed.
 

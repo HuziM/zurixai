@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zurixai"
-version = "0.2.0"
+version = "0.3.0"
 description = "ZurixAI — catch broken packages, phantom imports, and schema drift before they reach production"
 readme = "README.md"
 license = {text = "MIT"}

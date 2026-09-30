@@ -19,12 +19,22 @@ def parse_rules(rules_file: Path) -> dict:
     if not rules_file.exists():
         return result
 
-    result["file_exists"] = True
-
     try:
         content = rules_file.read_text()
     except (OSError, UnicodeDecodeError):
+        result["file_exists"] = True
         return result
+    return parse_rules_text(content)
+
+
+def parse_rules_text(content: str) -> dict:
+    """Parse rules.md content (e.g. fetched from another repo) into the same shape as parse_rules."""
+    result: dict[str, Any] = {
+        "rule_count": 0,
+        "rules": [],
+        "sections": [],
+        "file_exists": True,
+    }
 
     # Parse sections and their rules
     current_section = "general"
