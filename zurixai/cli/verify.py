@@ -36,8 +36,9 @@ def cmd_verify(args: list[str]) -> None:
     if len(positional) < 1:
         print(f"{_C.BOLD}Usage:{_C.RESET} zurix verify <audit.json> [--key <pubkey_hex>]")
         print()
-        print("  Validates the Ed25519 signature, checks the hash chain, and")
+        print("  Verifies one entry: its Ed25519 signature and its own hash, and")
         print("  prints the source field (server-run or client-submitted).")
+        print("  It does not walk the chain of entries.")
         print()
         print("  If --key is omitted, the public key is fetched from")
         print("  https://zurixai.com/.well-known/zurixai-pubkey")
@@ -103,9 +104,9 @@ def cmd_verify(args: list[str]) -> None:
 
     # Hash check
     if hash_ok:
-        print(f"  {_C.GREEN}✓{_C.RESET} Hash chain: {_C.GREEN}valid{_C.RESET}")
+        print(f"  {_C.GREEN}✓{_C.RESET} Entry hash: {_C.GREEN}valid{_C.RESET}")
     else:
-        print(f"  {_C.RED}✗{_C.RESET} Hash chain: {_C.RED}INVALID{_C.RESET}")
+        print(f"  {_C.RED}✗{_C.RESET} Entry hash: {_C.RED}INVALID{_C.RESET}")
 
     # Signature check
     if sig_ok:

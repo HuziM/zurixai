@@ -103,3 +103,40 @@ def test_init_needs_no_api_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     assert "api_key" not in config and "engine_url" not in config
     out = capsys.readouterr().out
     assert "API key" not in out and "API_KEY" not in out and "--pro" not in out
+
+
+def _signed_entry(tmp_path: Path) -> tuple[Path, str]:
+    import base64
+    import hashlib
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+    key = Ed25519PrivateKey.generate()
+    entry = {
+        "key_id": "k1", "chain_index": 0, "prev_hash": "", "timestamp": "2026-09-30T00:00:00+00:00",
+        "tool_version": "0.4.0", "repo": "o/r", "pr": 1, "head_commit_sha": "a" * 40,
+        "rules_hash": "", "source": "server", "checks": [], "conclusion": "pass",
+    }
+    canonical = json.dumps(entry, separators=(",", ":"), sort_keys=True)
+    entry["entry_hash"] = hashlib.sha256(canonical.encode()).hexdigest()
+    entry["signature"] = base64.b64encode(key.sign(canonical.encode())).decode()
+    path = tmp_path / "audit.json"
+    path.write_text(json.dumps(entry))
+    return path, key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw).hex()
+
+
+def test_verify_help_does_not_claim_chain_verification(capsys):
+    assert _run(["verify"]) == 1
+    out = capsys.readouterr().out.lower()
+    assert "checks the hash chain" not in out
+    assert "one entry" in out
+
+
+def test_verify_labels_the_entry_hash_not_the_chain(tmp_path, capsys):
+    path, pubkey = _signed_entry(tmp_path)
+    assert _run(["verify", str(path), "--key", pubkey, "--no-color"]) == 0
+    out = capsys.readouterr().out
+    assert "Entry hash: valid" in out
+    assert "Signature: valid" in out
+    assert "Hash chain" not in out
