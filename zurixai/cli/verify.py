@@ -1,12 +1,15 @@
-"""zurix verify — Validate a signed audit report."""
+"""zurix verify — validate a signed audit entry or a whole exported audit log."""
 
 from __future__ import annotations
 
-import base64
-import hashlib
 import json
 import sys
 from pathlib import Path
+from typing import Any
+
+from zurixai.provenance import EntryResult, key_id_for, verify_chain, verify_entry
+
+PUBKEY_URL = "https://zurixai.com/.well-known/zurixai-pubkey"
 
 
 # ANSI color codes
@@ -24,135 +27,165 @@ class _C:
             setattr(cls, attr, "")
 
 
+def _usage() -> None:
+    print(f"{_C.BOLD}Usage:{_C.RESET} zurix verify <audit.json | log.jsonl> [--key <pubkey_hex>]")
+    print()
+    print("  One entry: checks its Ed25519 signature and its own hash, and prints")
+    print("  the source field (server-run or client-submitted).")
+    print("  Several entries (a JSON array or one entry per line): checks every entry,")
+    print("  then that chain indexes are contiguous and each prev_hash links to the")
+    print("  entry before it.")
+    print()
+    print("  If --key is omitted, the public key is fetched from")
+    print(f"  {PUBKEY_URL}")
+
+
+def _parse_args(args: list[str]) -> tuple[str | None, str | None]:
+    path = key = None
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--key" and i + 1 < len(args):
+            key = args[i + 1]
+            i += 2
+            continue
+        if not a.startswith("--") and path is None:
+            path = a
+        i += 1
+    return path, key
+
+
+def _load_entries(text: str) -> list[dict[str, Any]]:
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        data = [json.loads(line) for line in text.splitlines() if line.strip()]
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list) or not all(isinstance(e, dict) for e in data):
+        raise ValueError("expected a JSON object, a JSON array of objects, or one object per line")
+    return data
+
+
+def _mark(ok: bool) -> str:
+    return f"{_C.GREEN}✓{_C.RESET}" if ok else f"{_C.RED}✗{_C.RESET}"
+
+
+def _key_id_line(result: EntryResult, entry: dict[str, Any], pubkey_hex: str) -> str:
+    if result.key_id_matches:
+        return f"  {_C.DIM}Key ID:       {entry['key_id']} (matches the key){_C.RESET}"
+    return (f"  {_C.YELLOW}!{_C.RESET} Key ID {entry['key_id']} is not the id of this key "
+            f"({key_id_for(pubkey_hex)}). It is a label; the signature is what counts.")
+
+
+def _print_single(entry: dict[str, Any], result: EntryResult, pubkey_hex: str) -> None:
+    print(f"  {_mark(result.hash_ok)} Entry hash: "
+          + (f"{_C.GREEN}valid{_C.RESET}" if result.hash_ok else f"{_C.RED}INVALID{_C.RESET}"))
+    print(f"  {_mark(result.signature_ok)} Signature: "
+          + (f"{_C.GREEN}valid{_C.RESET}" if result.signature_ok else f"{_C.RED}INVALID{_C.RESET}"))
+
+    print()
+    print(_key_id_line(result, entry, pubkey_hex))
+    print(f"  {_C.DIM}Chain index:  {entry['chain_index']}{_C.RESET}")
+    print(f"  {_C.DIM}Timestamp:    {entry['timestamp']}{_C.RESET}")
+    print(f"  {_C.DIM}Tool version: {entry['tool_version']}{_C.RESET}")
+    print(f"  {_C.DIM}Repo:         {entry['repo']}{_C.RESET}")
+    print(f"  {_C.DIM}PR:           #{entry['pr']}{_C.RESET}")
+    print(f"  {_C.DIM}Commit:       {str(entry['head_commit_sha'])[:12]}{_C.RESET}")
+    print(f"  {_C.DIM}Source:       {entry['source']}{_C.RESET}")
+    print(f"  {_C.DIM}Conclusion:   {entry['conclusion']}{_C.RESET}")
+
+    checks = entry.get("checks") or []
+    if checks:
+        print()
+        print(f"  {_C.BOLD}Checks ({len(checks)}):{_C.RESET}")
+        for c in checks:
+            status = c.get("status", "unknown")
+            glyph = {"pass": f"{_C.GREEN}✓{_C.RESET}", "fail": f"{_C.RED}✗{_C.RESET}",
+                     "warn": f"{_C.YELLOW}!{_C.RESET}"}.get(status, f"{_C.DIM}○{_C.RESET}")
+            print(f"    {glyph} {c.get('check_id', '?')}: {status}")
+
+
 def cmd_verify(args: list[str]) -> None:
-    """Verify a signed audit report against a public key."""
+    """Verify signed audit entries against a public key."""
     use_color = "--no-color" not in args and sys.stdout.isatty()
     if not use_color:
         _C.disable()
 
-    # Parse args
-    positional = [a for a in args if not a.startswith("--")]
-
-    if len(positional) < 1:
-        print(f"{_C.BOLD}Usage:{_C.RESET} zurix verify <audit.json> [--key <pubkey_hex>]")
-        print()
-        print("  Verifies one entry: its Ed25519 signature and its own hash, and")
-        print("  prints the source field (server-run or client-submitted).")
-        print("  It does not walk the chain of entries.")
-        print()
-        print("  If --key is omitted, the public key is fetched from")
-        print("  https://zurixai.com/.well-known/zurixai-pubkey")
+    path_arg, pubkey_hex = _parse_args(args)
+    if path_arg is None:
+        _usage()
         sys.exit(1)
 
-    audit_path = Path(positional[0])
+    audit_path = Path(path_arg)
     if not audit_path.exists():
         print(f"{_C.RED}Error:{_C.RESET} File not found: {audit_path}")
         sys.exit(1)
 
     try:
-        data = json.loads(audit_path.read_text())
-    except json.JSONDecodeError as e:
-        print(f"{_C.RED}Error:{_C.RESET} Invalid JSON: {e}")
+        entries = _load_entries(audit_path.read_text())
+    except (json.JSONDecodeError, ValueError) as e:
+        print(f"{_C.RED}Error:{_C.RESET} Invalid audit file: {e}")
+        sys.exit(1)
+    if not entries:
+        print(f"{_C.RED}Error:{_C.RESET} No entries in {audit_path}")
         sys.exit(1)
 
-    # Get public key
-    pubkey_hex = None
-    for i, a in enumerate(args):
-        if a == "--key" and i + 1 < len(args):
-            pubkey_hex = args[i + 1]
-            break
-
     if pubkey_hex is None:
-        # Fetch from well-known URL
         pubkey_hex = _fetch_public_key()
         if pubkey_hex is None:
             print(f"{_C.RED}Error:{_C.RESET} Could not fetch public key.")
             print("  Provide it with: --key <pubkey_hex>")
             sys.exit(1)
 
-    # Validate required fields
-    required = ["key_id", "chain_index", "prev_hash", "timestamp", "tool_version",
-                 "repo", "pr", "head_commit_sha", "rules_hash", "source",
-                 "checks", "conclusion", "entry_hash", "signature"]
-    missing = [f for f in required if f not in data]
-    if missing:
-        print(f"{_C.RED}Error:{_C.RESET} Missing fields: {', '.join(missing)}")
-        sys.exit(1)
-
-    # Reconstruct canonical form for verification
-    payload = {k: data[k] for k in data if k not in ("entry_hash", "signature")}
-    # Convert checks to match schema format
-    if "checks" in payload:
-        payload["checks"] = [
-            {k: v for k, v in c.items()} for c in payload["checks"]
-        ]
-    canonical = json.dumps(payload, separators=(",", ":"), sort_keys=True, default=str)
-
-    # Verify hash
-    expected_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    hash_ok = expected_hash == data["entry_hash"]
-
-    # Verify signature
-    sig_ok = _verify_signature(canonical, data["signature"], pubkey_hex)
-
-    # Print results
     print()
     print(f"{_C.BOLD}{'═' * 56}{_C.RESET}")
     print(f"{_C.BOLD}  ZurixAI Audit Verification{_C.RESET}")
     print(f"{_C.BOLD}{'═' * 56}{_C.RESET}")
     print()
 
-    # Hash check
-    if hash_ok:
-        print(f"  {_C.GREEN}✓{_C.RESET} Entry hash: {_C.GREEN}valid{_C.RESET}")
+    if len(entries) == 1:
+        result = verify_entry(entries[0], pubkey_hex)
+        if result.missing:
+            print(f"{_C.RED}Error:{_C.RESET} Missing fields: {', '.join(result.missing)}")
+            sys.exit(1)
+        _print_single(entries[0], result, pubkey_hex)
+        passed = result.ok
     else:
-        print(f"  {_C.RED}✗{_C.RESET} Entry hash: {_C.RED}INVALID{_C.RESET}")
-
-    # Signature check
-    if sig_ok:
-        print(f"  {_C.GREEN}✓{_C.RESET} Signature: {_C.GREEN}valid{_C.RESET}")
-    else:
-        print(f"  {_C.RED}✗{_C.RESET} Signature: {_C.RED}INVALID{_C.RESET}")
-
-    # Entry details
-    print()
-    print(f"  {_C.DIM}Key ID:       {data['key_id']}{_C.RESET}")
-    print(f"  {_C.DIM}Chain index:  {data['chain_index']}{_C.RESET}")
-    print(f"  {_C.DIM}Timestamp:    {data['timestamp']}{_C.RESET}")
-    print(f"  {_C.DIM}Tool version: {data['tool_version']}{_C.RESET}")
-    print(f"  {_C.DIM}Repo:         {data['repo']}{_C.RESET}")
-    print(f"  {_C.DIM}PR:           #{data['pr']}{_C.RESET}")
-    print(f"  {_C.DIM}Commit:       {data['head_commit_sha'][:12]}{_C.RESET}")
-    print(f"  {_C.DIM}Source:       {data['source']}{_C.RESET}")
-    print(f"  {_C.DIM}Conclusion:   {data['conclusion']}{_C.RESET}")
-
-    # Checks
-    checks = data.get("checks", [])
-    if checks:
+        chain = verify_chain(entries, pubkey_hex)
+        for r in chain.entries:
+            if r.missing:
+                print(f"  {_mark(False)} Entry {r.chain_index}: missing {', '.join(r.missing)}")
+                continue
+            detail = "valid" if r.ok else (
+                "hash INVALID" if not r.hash_ok else "signature INVALID")
+            print(f"  {_mark(r.ok)} Entry {r.chain_index}: {detail}")
         print()
-        print(f"  {_C.BOLD}Checks ({len(checks)}):{_C.RESET}")
-        for c in checks:
-            status = c.get("status", "unknown")
-            check_id = c.get("check_id", "?")
-            if status == "pass":
-                glyph = f"{_C.GREEN}✓{_C.RESET}"
-            elif status == "fail":
-                glyph = f"{_C.RED}✗{_C.RESET}"
-            elif status == "warn":
-                glyph = f"{_C.YELLOW}!{_C.RESET}"
-            else:
-                glyph = f"{_C.DIM}○{_C.RESET}"
-            print(f"    {glyph} {check_id}: {status}")
+        if chain.errors:
+            for err in chain.errors:
+                print(f"  {_mark(False)} {err}")
+        else:
+            span = f"index {chain.first_index}..{chain.last_index}"
+            print(f"  {_mark(True)} Chain: {_C.GREEN}linked{_C.RESET} ({len(chain.entries)} entries, {span})")
+            for rename in chain.renames:
+                print(f"  {_C.DIM}Repo renamed or moved: {rename}{_C.RESET}")
+            if chain.partial:
+                print(f"  {_C.YELLOW}!{_C.RESET} Partial range: entries before {chain.first_index} "
+                      "are not in this file, so its start can't be checked.")
+        mismatched = sum(1 for r in chain.entries if not r.missing and not r.key_id_matches)
+        if mismatched:
+            print(f"  {_C.YELLOW}!{_C.RESET} {mismatched} entries carry a key id other than "
+                  f"{key_id_for(pubkey_hex)} (a label; the signatures are what count).")
+        passed = chain.ok
 
     print()
-    if hash_ok and sig_ok:
+    if passed:
         print(f"  {_C.GREEN}{_C.BOLD}Verification passed{_C.RESET}")
     else:
         print(f"  {_C.RED}{_C.BOLD}Verification FAILED{_C.RESET}")
-
     print(f"{'═' * 56}\n")
 
-    if not hash_ok or not sig_ok:
+    if not passed:
         sys.exit(1)
 
 
@@ -162,25 +195,9 @@ def _fetch_public_key() -> str | None:
     import urllib.request
 
     try:
-        url = "https://zurixai.com/.well-known/zurixai-pubkey"
-        req = urllib.request.Request(url, headers={"User-Agent": "zurix-verify/0.4.0"})
+        req = urllib.request.Request(PUBKEY_URL, headers={"User-Agent": "zurix-verify"})
         with urllib.request.urlopen(req, timeout=10) as resp:
             body: bytes = resp.read()
             return body.decode("utf-8").strip()
     except (urllib.error.URLError, OSError, ValueError):
         return None
-
-
-def _verify_signature(canonical: str, signature_b64: str, pubkey_hex: str) -> bool:
-    """Verify an Ed25519 signature against the canonical form and public key."""
-    import binascii
-
-    from cryptography.exceptions import InvalidSignature
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-
-    try:
-        public_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(pubkey_hex))
-        public_key.verify(base64.b64decode(signature_b64), canonical.encode("utf-8"))
-        return True
-    except (InvalidSignature, ValueError, binascii.Error):
-        return False

@@ -105,38 +105,63 @@ def test_init_needs_no_api_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     assert "API key" not in out and "API_KEY" not in out and "--pro" not in out
 
 
-def _signed_entry(tmp_path: Path) -> tuple[Path, str]:
-    import base64
-    import hashlib
-
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
-
-    key = Ed25519PrivateKey.generate()
-    entry = {
-        "key_id": "k1", "chain_index": 0, "prev_hash": "", "timestamp": "2026-09-30T00:00:00+00:00",
-        "tool_version": "0.4.0", "repo": "o/r", "pr": 1, "head_commit_sha": "a" * 40,
-        "rules_hash": "", "source": "server", "checks": [], "conclusion": "pass",
-    }
-    canonical = json.dumps(entry, separators=(",", ":"), sort_keys=True)
-    entry["entry_hash"] = hashlib.sha256(canonical.encode()).hexdigest()
-    entry["signature"] = base64.b64encode(key.sign(canonical.encode())).decode()
-    path = tmp_path / "audit.json"
-    path.write_text(json.dumps(entry))
-    return path, key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw).hex()
+def _write(tmp_path: Path, entries: list[dict], jsonl: bool = False) -> Path:
+    path = tmp_path / ("log.jsonl" if jsonl else "audit.json")
+    if jsonl:
+        path.write_text("".join(json.dumps(e) + "\n" for e in entries))
+    else:
+        path.write_text(json.dumps(entries[0] if len(entries) == 1 else entries))
+    return path
 
 
-def test_verify_help_does_not_claim_chain_verification(capsys):
+def test_verify_help_describes_entry_and_chain_checks(capsys):
     assert _run(["verify"]) == 1
     out = capsys.readouterr().out.lower()
-    assert "checks the hash chain" not in out
-    assert "one entry" in out
+    assert "one entry" in out and "prev_hash links" in out
 
 
-def test_verify_labels_the_entry_hash_not_the_chain(tmp_path, capsys):
-    path, pubkey = _signed_entry(tmp_path)
-    assert _run(["verify", str(path), "--key", pubkey, "--no-color"]) == 0
+def test_verify_single_entry_labels_the_entry_hash(tmp_path, capsys):
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from tests.test_provenance import make_chain, pubkey_hex
+
+    key = Ed25519PrivateKey.generate()
+    path = _write(tmp_path, make_chain(key, 1))
+    assert _run(["verify", str(path), "--key", pubkey_hex(key), "--no-color"]) == 0
     out = capsys.readouterr().out
-    assert "Entry hash: valid" in out
-    assert "Signature: valid" in out
-    assert "Hash chain" not in out
+    assert "Entry hash: valid" in out and "Signature: valid" in out
+    assert "(matches the key)" in out
+
+
+def test_verify_key_flag_may_come_before_the_file(tmp_path):
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from tests.test_provenance import make_chain, pubkey_hex
+
+    key = Ed25519PrivateKey.generate()
+    path = _write(tmp_path, make_chain(key, 1))
+    assert _run(["verify", "--key", pubkey_hex(key), str(path), "--no-color"]) == 0
+
+
+def test_verify_jsonl_log_walks_the_chain(tmp_path, capsys):
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from tests.test_provenance import make_chain, pubkey_hex
+
+    key = Ed25519PrivateKey.generate()
+    path = _write(tmp_path, make_chain(key, 3), jsonl=True)
+    assert _run(["verify", str(path), "--key", pubkey_hex(key), "--no-color"]) == 0
+    assert "Chain: linked (3 entries, index 0..2)" in capsys.readouterr().out
+
+
+def test_verify_log_with_a_missing_entry_fails(tmp_path, capsys):
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from tests.test_provenance import make_chain, pubkey_hex
+
+    key = Ed25519PrivateKey.generate()
+    entries = make_chain(key, 3)
+    path = _write(tmp_path, [entries[0], entries[2]])
+    assert _run(["verify", str(path), "--key", pubkey_hex(key), "--no-color"]) == 1
+    out = capsys.readouterr().out
+    assert "jumps from 0 to 2" in out and "Verification FAILED" in out
