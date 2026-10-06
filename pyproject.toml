@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zurixai"
-version = "0.3.0"
+version = "0.4.0"
 description = "ZurixAI — catch broken packages, phantom imports, and schema drift before they reach production"
 readme = "README.md"
 license = {text = "MIT"}
@@ -22,6 +22,8 @@ dependencies = [
     "PyYAML>=6.0",
     "textual>=0.40.0",
     "cryptography>=42.0",
+    "packaging>=23.0",
+    "semantic_version>=2.10",
 ]
 
 [project.optional-dependencies]
@@ -41,3 +43,7 @@ target-version = "py312"
 python_version = "3.12"
 warn_return_any = true
 warn_unused_configs = true
+
+[[tool.mypy.overrides]]
+module = ["semantic_version"]
+ignore_missing_imports = true

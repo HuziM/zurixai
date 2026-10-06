@@ -53,7 +53,8 @@ def count_critical(checks: dict) -> int:
         1 for pkg in checks.get("supply_chain", {}).get("suspicious_packages", [])
         if pkg.get("score", 0) >= CRITICAL_SUPPLY_SCORE
     )
-    return invalid + suspicious
+    missing_versions = len(checks.get("supply_chain", {}).get("version_not_found", []))
+    return invalid + suspicious + missing_versions
 
 
 def cmd_check(cfg: Config, path: str, *, use_json: bool, list_checks: bool, no_color: bool) -> int:
@@ -130,11 +131,17 @@ def _print_results(results: dict, elapsed: float) -> None:
     supply = checks.get("supply_chain", {})
     suspicious = supply.get("suspicious", 0)
     unavailable = supply.get("unavailable", 0)
+    missing = supply.get("version_not_found", [])
     if unavailable:
         message = f"{unavailable} registry lookup(s) unavailable; scan incomplete"
         issues.append(("warning", message))
         print(f"  Supply Chain: {message}")
-    if suspicious == 0 and not unavailable:
+    for entry in missing:
+        message = (f"Version doesn't exist: {entry['name']} {entry['spec']} "
+                   f"(latest on {entry['source']}: {entry['latest_version'] or 'unknown'})")
+        issues.append(("critical", message))
+        print(f"  {_C.RED}✗{_C.RESET} Supply Chain: {_C.RED}CRITICAL{_C.RESET} {message}")
+    if suspicious == 0 and not unavailable and not missing:
         print(f"  {_C.GREEN}✓{_C.RESET} Supply Chain: {_C.GREEN}{supply.get('checked', 0)} packages OK{_C.RESET}")
     elif suspicious:
         print(f"  {_C.YELLOW}!{_C.RESET} Supply Chain: {_C.YELLOW}{suspicious} suspicious{_C.RESET} ({supply.get('checked', 0)} checked)")
