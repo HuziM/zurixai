@@ -81,7 +81,7 @@ def check_supply_chain(project_dir: Path) -> dict:
         # Registry checks
         if pkg_name in registry_results:
             info = registry_results[pkg_name]
-            result["details"][pkg_name] = {k: v for k, v in info.items() if k != "versions"}
+            result["details"][pkg_name] = {k: v for k, v in info.items() if k not in ("versions", "yanked_versions")}
             if info.get("status") == "unavailable":
                 result["unavailable"] += 1
             if info.get("status") == "not_found":
@@ -96,7 +96,8 @@ def check_supply_chain(project_dir: Path) -> dict:
 
         info = registry_results.get(pkg_name, {})
         for spec in sorted(specs.get(pkg_name, ())):
-            if info.get("status") == "ok" and not _spec_satisfied(spec, info.get("versions", []), pkg_source):
+            if info.get("status") == "ok" and not _spec_satisfied(
+                    spec, info.get("versions", []), pkg_source, info.get("yanked_versions", [])):
                 result["version_not_found"].append({
                     "name": pkg_name, "source": pkg_source, "spec": spec,
                     "latest_version": info.get("latest_version", ""),
@@ -197,8 +198,11 @@ def _is_npm_range(rng: str) -> bool:
     return any(ch.isdigit() for ch in rng)
 
 
-def _spec_satisfied(spec: str, versions: list[str], source: str) -> bool:
-    """Whether any published version satisfies the constraint. Unparseable constraints count as satisfied."""
+def _spec_satisfied(spec: str, versions: list[str], source: str, yanked: list[str] | None = None) -> bool:
+    """Whether any published version satisfies the constraint. Unparseable constraints count as satisfied.
+
+    PyPI: like pip (PEP 592), a yanked release satisfies only an exact `==`/`===` pin, never a range.
+    """
     if source == "npm":
         import semantic_version
 
@@ -221,8 +225,11 @@ def _spec_satisfied(spec: str, versions: list[str], source: str) -> bool:
         spec_set = SpecifierSet(spec)
     except InvalidSpecifier:
         return True
+    specs = list(spec_set)
+    exact_pin = len(specs) == 1 and specs[0].operator in ("==", "===") and "*" not in specs[0].version
+    candidates = list(versions) + (list(yanked or []) if exact_pin else [])
     parsed = []
-    for v in versions:
+    for v in candidates:
         try:
             parsed.append(Version(v))
         except InvalidVersion:
@@ -337,10 +344,11 @@ def _check_pypi_registry(pkg_name: str) -> dict:
             return {
                 "status": "ok",
                 "latest_version": latest_version,
-                # Releases with at least one file that isn't yanked (pip won't install yanked ones
-                # unless pinned exactly, so a yanked-only match is treated as missing).
+                # pip skips yanked releases for ranges but installs them for an exact pin (PEP 592).
                 "versions": [v for v, files in release.items()
                              if files and not all(f.get("yanked") for f in files)],
+                "yanked_versions": [v for v, files in release.items()
+                                    if files and all(f.get("yanked") for f in files)],
                 "last_release": last_release_date,
                 "is_deprecated": info.get("yanked", False),
                 "is_unmaintained": is_unmaintained,

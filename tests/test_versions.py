@@ -57,13 +57,16 @@ def test_python_pins_and_ranges_that_no_release_satisfies(tmp_path: Path) -> Non
 @pytest.mark.parametrize(("spec", "ok"), [
     ("==3.1.5", True), (">=3.0,<3.2", True), ("~=3.1.0", True), ("==3.1.*", True),
     ("==3.10.10", False), (">=3.6.0", False),
-    ("==3.1.4", False),   # only yanked files
+    ("==3.1.4", True),    # yanked, but pip installs an exact pin to a yanked release (PEP 592)
+    (">=3.1.4,<3.1.5", False),  # a range never selects a yanked release
     ("==9.9.9", False),   # release entry with no files
     ("==3.2.0b1", True),  # an explicitly pinned pre-release exists
 ])
 def test_python_specifier_rules(spec: str, ok: bool) -> None:
-    versions = [v for v, files in PYPI["openpyxl"].items() if files and not all(f["yanked"] for f in files)]
-    assert _spec_satisfied(spec, versions, "pypi") is ok
+    files = PYPI["openpyxl"]
+    versions = [v for v, f in files.items() if f and not all(x["yanked"] for x in f)]
+    yanked = [v for v, f in files.items() if f and all(x["yanked"] for x in f)]
+    assert _spec_satisfied(spec, versions, "pypi", yanked) is ok
 
 
 @pytest.mark.parametrize(("rng", "ok"), [
@@ -91,6 +94,7 @@ def test_unpinned_and_missing_packages_are_not_version_findings(tmp_path: Path) 
     assert result["version_not_found"] == []
     assert result["details"]["not-a-real-pkg-zx"]["status"] == "not_found"
     assert "versions" not in result["details"]["requests"]
+    assert "yanked_versions" not in result["details"]["requests"]
 
 
 def test_missing_version_is_critical_and_fails_the_check(tmp_path: Path) -> None:
