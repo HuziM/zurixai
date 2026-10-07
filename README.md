@@ -15,6 +15,7 @@ zurix check .
 
 - **Phantom import detection** — every import not declared in your manifest is looked up on npm/PyPI and reported as *phantom* (the package doesn't exist), *missing dependency* (it exists but isn't declared) or *unverified* (registry unreachable)
 - **Import validation** — Python (`pyproject.toml`, requirements files, `setup.py`, Poetry) and JavaScript/TypeScript (nearest `package.json`, workspaces)
+- **Versions that don't exist** — every declared version or range (`openpyxl>=3.6.0`, `airtable@^2.1.0`) is checked against the registry's published releases; if none matches, the install would fail and it's reported as critical
 - **Supply chain checks** — registry metadata, deprecation, typosquatting heuristics for declared dependencies
 - **Drift detection** — orphaned functions, stale files
 - **Rules** — define quality rules in `.zurix/rules.md` (loaded and classified; enforcement is coming)
@@ -36,7 +37,7 @@ zurix --help           # All commands and options
 
 `zurix verify` checks each entry's Ed25519 signature and its own hash. Given a whole log (a JSON array or one entry per line), it also checks that chain indexes are contiguous and that each entry's `prev_hash` is the previous entry's hash, so a dropped, reordered or altered entry fails. Without `--key`, the public key is fetched from https://zurixai.com/.well-known/zurixai-pubkey.
 
-`zurix check` exits `1` when it finds critical issues (phantom or undeclared imports, packages missing from their registry), so it can gate CI. No API key or account is needed.
+`zurix check` exits `1` when it finds critical issues (phantom or undeclared imports, packages missing from their registry, declared versions that don't exist), so it can gate CI. No API key or account is needed.
 
 ## Rules
 

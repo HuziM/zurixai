@@ -10,7 +10,7 @@ from typing import Any
 
 import httpx
 
-from zurixai.manifests import distribution_spellings, python_declared_deps
+from zurixai.manifests import distribution_spellings, python_declared_deps, python_declared_specs
 
 
 def check_supply_chain(project_dir: Path) -> dict:
@@ -20,11 +20,13 @@ def check_supply_chain(project_dir: Path) -> dict:
         "suspicious": 0,
         "unavailable": 0,
         "suspicious_packages": [],
+        "version_not_found": [],
         "details": {},
     }
 
     # Collect packages from package.json + requirements.txt
     packages = _collect_packages(project_dir)
+    specs = _collect_specs(project_dir)
 
     if not packages:
         return result
@@ -79,7 +81,7 @@ def check_supply_chain(project_dir: Path) -> dict:
         # Registry checks
         if pkg_name in registry_results:
             info = registry_results[pkg_name]
-            result["details"][pkg_name] = info
+            result["details"][pkg_name] = {k: v for k, v in info.items() if k not in ("versions", "yanked_versions")}
             if info.get("status") == "unavailable":
                 result["unavailable"] += 1
             if info.get("status") == "not_found":
@@ -91,6 +93,15 @@ def check_supply_chain(project_dir: Path) -> dict:
             if info.get("is_unmaintained"):
                 suspicion_score += 1
                 reasons.append("unmaintained (no recent updates)")
+
+        info = registry_results.get(pkg_name, {})
+        for spec in sorted(specs.get(pkg_name, ())):
+            if info.get("status") == "ok" and not _spec_satisfied(
+                    spec, info.get("versions", []), pkg_source, info.get("yanked_versions", [])):
+                result["version_not_found"].append({
+                    "name": pkg_name, "source": pkg_source, "spec": spec,
+                    "latest_version": info.get("latest_version", ""),
+                })
 
         if suspicion_score >= 2:
             result["suspicious"] += 1
@@ -161,6 +172,71 @@ def _collect_packages(project_dir: Path) -> dict[str, str]:
     return packages
 
 
+def _collect_specs(project_dir: Path) -> dict[str, set[str]]:
+    """Declared version constraints: npm ranges from package.json, PEP 440 specifiers for Python."""
+    specs: dict[str, set[str]] = {}
+    package_json = project_dir / "package.json"
+    if package_json.exists():
+        try:
+            data = json.loads(package_json.read_text())
+            for field in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies"):
+                for dep, rng in (data.get(field) or {}).items():
+                    if isinstance(rng, str) and _is_npm_range(rng):
+                        specs.setdefault(dep, set()).add(rng.strip())
+        except json.JSONDecodeError:
+            pass
+    for name, found in python_declared_specs(project_dir).items():
+        specs.setdefault(name, set()).update(found)
+    return specs
+
+
+def _is_npm_range(rng: str) -> bool:
+    """A semver range we can evaluate (not a URL, path, git/workspace/alias spec, or dist-tag)."""
+    rng = rng.strip()
+    if not rng or rng in ("*", "x", "latest") or ":" in rng or "/" in rng:
+        return False
+    return any(ch.isdigit() for ch in rng)
+
+
+def _spec_satisfied(spec: str, versions: list[str], source: str, yanked: list[str] | None = None) -> bool:
+    """Whether any published version satisfies the constraint. Unparseable constraints count as satisfied.
+
+    PyPI: like pip (PEP 592), a yanked release satisfies only an exact `==`/`===` pin, never a range.
+    """
+    if source == "npm":
+        import semantic_version
+
+        try:
+            npm_spec = semantic_version.NpmSpec(spec)
+        except ValueError:
+            return True
+        for v in versions:
+            try:
+                if npm_spec.match(semantic_version.Version(v)):
+                    return True
+            except ValueError:
+                continue
+        return False
+
+    from packaging.specifiers import InvalidSpecifier, SpecifierSet
+    from packaging.version import InvalidVersion, Version
+
+    try:
+        spec_set = SpecifierSet(spec)
+    except InvalidSpecifier:
+        return True
+    specs = list(spec_set)
+    exact_pin = len(specs) == 1 and specs[0].operator in ("==", "===") and "*" not in specs[0].version
+    candidates = list(versions) + (list(yanked or []) if exact_pin else [])
+    parsed = []
+    for v in candidates:
+        try:
+            parsed.append(Version(v))
+        except InvalidVersion:
+            continue
+    return any(True for _ in spec_set.filter(parsed))
+
+
 def _is_likely_typosquat(pkg_name: str) -> bool:
     """Check if a package name looks like a typosquatting attempt."""
     # Strip @scope/ prefix for pattern matching
@@ -226,6 +302,7 @@ def _check_npm_registry(pkg_name: str) -> dict:
             return {
                 "status": "ok",
                 "latest_version": latest_version,
+                "versions": list(data.get("versions", {})),
                 "last_modified": modified,
                 "is_deprecated": deprecated is not None,
                 "is_unmaintained": is_unmaintained,
@@ -267,6 +344,11 @@ def _check_pypi_registry(pkg_name: str) -> dict:
             return {
                 "status": "ok",
                 "latest_version": latest_version,
+                # pip skips yanked releases for ranges but installs them for an exact pin (PEP 592).
+                "versions": [v for v, files in release.items()
+                             if files and not all(f.get("yanked") for f in files)],
+                "yanked_versions": [v for v, files in release.items()
+                                    if files and all(f.get("yanked") for f in files)],
                 "last_release": last_release_date,
                 "is_deprecated": info.get("yanked", False),
                 "is_unmaintained": is_unmaintained,

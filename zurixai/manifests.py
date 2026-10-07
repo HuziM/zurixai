@@ -108,6 +108,67 @@ def python_declared_deps(project_dir: Path) -> set[str]:
     return names
 
 
+def _spec_of(requirement: str) -> tuple[str, str] | None:
+    """(normalized name, PEP 440 specifier) for a PEP 508 requirement with a version constraint."""
+    from packaging.requirements import InvalidRequirement, Requirement
+
+    try:
+        req = Requirement(requirement)
+    except InvalidRequirement:
+        return None
+    if req.url or not str(req.specifier):
+        return None
+    return normalize_name(req.name), str(req.specifier)
+
+
+def _specs_from_list(specs: object) -> list[tuple[str, str]]:
+    found = []
+    if isinstance(specs, list):
+        for spec in specs:
+            if isinstance(spec, str) and (pair := _spec_of(spec)):
+                found.append(pair)
+    return found
+
+
+def python_declared_specs(project_dir: Path) -> dict[str, set[str]]:
+    """Version constraints declared for each dependency (PEP 621, requirements files, setup.py).
+
+    Poetry's own constraint syntax (`^1.2`) is not PEP 440 and is skipped.
+    """
+    pairs: list[tuple[str, str]] = []
+    if (pyproject := project_dir / "pyproject.toml").is_file():
+        try:
+            data = tomllib.loads(pyproject.read_text(encoding="utf-8", errors="replace"))
+        except (tomllib.TOMLDecodeError, OSError):
+            data = {}
+        project = data.get("project", {})
+        pairs += _specs_from_list(project.get("dependencies"))
+        for group in (project.get("optional-dependencies") or {}).values():
+            pairs += _specs_from_list(group)
+        for group in (data.get("dependency-groups") or {}).values():
+            pairs += _specs_from_list(group)
+    for req in iter_source_files(project_dir, {".txt"}):
+        if "requirements" in req.name:
+            for line in req.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = line.split(" #", 1)[0].split("\t#", 1)[0].strip()
+                if line and not line.startswith(("#", "-", ".", "/")) and (pair := _spec_of(line)):
+                    pairs.append(pair)
+    if (setup_py := project_dir / "setup.py").is_file():
+        try:
+            tree = ast.parse(setup_py.read_text(encoding="utf-8", errors="replace"))
+        except SyntaxError:
+            tree = None
+        for node in ast.walk(tree) if tree else ():
+            if (isinstance(node, ast.keyword) and node.arg == "install_requires"
+                    and isinstance(node.value, (ast.List, ast.Tuple))):
+                pairs += _specs_from_list([elt.value for elt in node.value.elts
+                                           if isinstance(elt, ast.Constant) and isinstance(elt.value, str)])
+    specs: dict[str, set[str]] = {}
+    for name, spec in pairs:
+        specs.setdefault(name, set()).add(spec)
+    return specs
+
+
 def python_project_name(project_dir: Path) -> str | None:
     """Normalized project name from pyproject.toml, if declared."""
     pyproject = project_dir / "pyproject.toml"
