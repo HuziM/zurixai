@@ -110,6 +110,19 @@ class TestPyPIImports:
         result = validate_pypi_imports(tmp_path)
         assert (result["valid"], result["invalid"]) == (3, 0)
 
+    def test_google_client_imports_map_to_their_distributions(self, tmp_path: Path) -> None:
+        self._project(tmp_path, '"google-api-python-client", "google-auth-oauthlib", "google-auth-httplib2"')
+        _write(tmp_path / "main.py", "from googleapiclient.discovery import build\n"
+                                     "from google_auth_oauthlib.flow import InstalledAppFlow\n"
+                                     "import google_auth_httplib2\n")
+        result = validate_pypi_imports(tmp_path)
+        assert (result["valid"], result["invalid"]) == (3, 0)
+
+    def test_undeclared_google_client_import_names_the_distribution(self, tmp_path: Path) -> None:
+        self._project(tmp_path, '"requests"')
+        _write(tmp_path / "main.py", "from googleapiclient.discovery import build\n")
+        assert validate_pypi_imports(tmp_path)["undeclared"]["googleapiclient"]["package"] == "google-api-python-client"
+
     def test_undeclared_import_is_reported_with_package_and_files(self, tmp_path: Path) -> None:
         self._project(tmp_path, '"requests"')
         _write(tmp_path / "pkg" / "a.py", "import numpy\nimport cv2\n")
